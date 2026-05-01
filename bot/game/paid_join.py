@@ -1,67 +1,96 @@
 """
-Paid game join — EIP-712 sign → POST /games/{id}/join-paid.
-Per paid-games.md: check balance → find room → sign → submit → poll currentGames.
+Paid game join — v1.6.0 Unified WebSocket EIP-712 flow.
+Per paid-games.md & api-summary.md: connect WS → hello (paid) → sign_required → sign_submit → joined.
 """
-import asyncio
-from bot.api_client import MoltyAPI, APIError
+import json
+import websockets
 from bot.web3.eip712_signer import sign_join_paid
 from bot.credentials import get_agent_private_key
-from bot.config import PAID_ENTRY_FEE_SMOLTZ
+from bot.config import PAID_ENTRY_FEE_SMOLTZ, SKILL_VERSION
 from bot.utils.logger import get_logger
 
 log = get_logger(__name__)
 
 
-async def join_paid_game(api: MoltyAPI) -> tuple[str, str]:
+async def join_paid_game(api_key: str):
     """
-    Join a paid room via EIP-712 signed flow.
-    Returns (game_id, agent_id) when registered.
+    Join a paid room via EIP-712 signed WebSocket flow.
+    Returns (response_data, websocket) when successfully joined.
     """
-    # Step 1: Balance check (mandatory before signing per paid-games.md)
-    me = await api.get_accounts_me()
-    balance = me.get("balance", 0)
-    if balance < PAID_ENTRY_FEE_SMOLTZ:
-        raise RuntimeError(
-            f"Insufficient sMoltz: {balance}/{PAID_ENTRY_FEE_SMOLTZ}. "
-            "Keep playing free rooms to earn more."
-        )
-
-    # Step 2: Find waiting paid game
-    games_resp = await api.get_games("waiting")
-    games = games_resp if isinstance(games_resp, list) else games_resp.get("games", [])
-    paid_games = [g for g in games if g.get("entryType") == "paid"]
-
-    if not paid_games:
-        raise RuntimeError("No waiting paid rooms available")
-
-    game = paid_games[0]
-    game_id = game["gameId"]
-    log.info("Found paid room: %s", game_id)
-
-    # Step 3: Get EIP-712 typed data
-    eip712_data = await api.get_join_paid_message(game_id)
-
-    # Step 4: Sign with Agent EOA
     agent_pk = get_agent_private_key()
     if not agent_pk:
         raise RuntimeError("Agent private key not found")
 
-    signature = sign_join_paid(agent_pk, eip712_data)
-    deadline = eip712_data["message"]["deadline"]
+    uri = "wss://cdn.moltyroyale.com/ws/join"
+    headers = {
+        "X-API-Key": api_key,
+        "X-Version": SKILL_VERSION  # Wajib 1.6.0
+    }
 
-    # Step 5: Submit (offchain by default)
-    log.info("Submitting paid join for game=%s...", game_id)
-    result = await api.post_join_paid(game_id, deadline, signature)
-    log.info("Paid join submitted: %s", result)
+    log.info("Connecting to Unified Join WebSocket for PAID room...")
+    
+    try:
+        # Step 1: Buka koneksi WebSocket
+        async with websockets.connect(uri, extra_headers=headers) as ws:
+            
+            # Step 2: Tunggu frame 'welcome'
+            welcome_msg = await ws.recv()
+            welcome_data = json.loads(welcome_msg)
+            
+            if welcome_data.get("type") == "welcome":
+                
+                # Step 3: Kirim frame 'hello' khusus paid room
+                hello_payload = {
+                    "type": "hello",
+                    "entryType": "paid",
+                    "mode": "offchain" # Ubah ke "onchain" jika menggunakan Moltz on-chain
+                }
+                await ws.send(json.dumps(hello_payload))
+                log.info("Sent 'hello' frame for paid room.")
 
-    # Step 6: Poll GET /accounts/me until currentGames[] shows the game
-    for attempt in range(30):  # Max 30 attempts × 2s = 60s timeout
-        await asyncio.sleep(2)
-        me = await api.get_accounts_me()
-        for cg in me.get("currentGames", []):
-            if cg.get("gameId") == game_id:
-                agent_id = cg["agentId"]
-                log.info("✅ Paid game active: game=%s agent=%s", game_id, agent_id)
-                return game_id, agent_id
+                # Step 4: Handle State Machine dari server
+                while True:
+                    resp_msg = await ws.recv()
+                    resp_data = json.loads(resp_msg)
+                    msg_type = resp_data.get("type") or resp_data.get("status")
 
-    raise RuntimeError(f"Paid game {game_id} did not appear in currentGames after 60s")
+                    if msg_type == "sign_required":
+                        log.info("Received sign_required. Signing EIP-712 data...")
+                        
+                        # Ekstrak joinIntentId dan data EIP-712 dari server
+                        join_intent_id = resp_data.get("joinIntentId")
+                        
+                        # Lakukan proses signing menggunakan fungsi bawaanmu
+                        # Sesuaikan ekstraksi 'resp_data' dengan struktur yang diminta oleh sign_join_paid
+                        signature = sign_join_paid(agent_pk, resp_data) 
+                        
+                        # Step 5: Submit signature kembali ke server
+                        sign_submit_payload = {
+                            "type": "sign_submit",
+                            "joinIntentId": join_intent_id,
+                            "signature": signature
+                        }
+                        await ws.send(json.dumps(sign_submit_payload))
+                        log.info("Signature submitted. Waiting for confirmation...")
+                        
+                    elif msg_type == "queued":
+                        log.info("⏳ Queued for paid room...")
+                        
+                    elif msg_type == "tx_submitted":
+                        log.info(f"Transaction submitted to chain. Hash: {resp_data.get('txHash')}")
+                        
+                    elif msg_type == "joined":
+                        game_id = resp_data.get("gameId")
+                        agent_id = resp_data.get("agentId")
+                        log.info(f"✅ Successfully joined paid game: game={game_id} agent={agent_id}")
+                        
+                        # Kembalikan socket yang aktif agar bisa dilanjutkan oleh brain.py (game loop)
+                        return resp_data, ws
+                        
+                    elif msg_type == "error":
+                        log.error(f"❌ Error joining paid room: {resp_data}")
+                        return None, None
+                        
+    except Exception as e:
+        log.error(f"WebSocket error during paid matchmaking: {e}")
+        return None, None
