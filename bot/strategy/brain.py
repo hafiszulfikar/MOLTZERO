@@ -2,7 +2,8 @@
 Strategy brain — main decision engine with priority-based action selection.
 Implements the game-loop.md priority chain for high win rate.
 
-v1.5.4 OP Mod changes:
+v1.5.5 OP Mod changes:
+- [OP MOD] EP Management Fix: Rest costs 0 EP, use_item costs 1 EP. Emergency rest added.
 - [OP MOD] Anti-Ping-Pong: Bot remembers last visited region to prevent infinite loops.
 - [OP MOD] Sniper + Hills Meta: Heavily prioritizes Hills if Sniper is equipped.
 - [OP MOD] Absolute Kill Steal: +9000 priority for any target that can be 1-shot.
@@ -184,7 +185,7 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
         if safe:
             return {"action": "move", "data": {"regionId": safe}, "reason": f"GUARDIAN FLEE: HP={hp}"}
 
-    # ── FREE ACTIONS ─────────
+    # ── FREE ACTIONS (0 EP) ─────────
     pickup_action = _check_pickup(visible_items, inventory, region_id)
     if pickup_action: return pickup_action
 
@@ -198,21 +199,28 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
 
     # ── [OP MOD] 3. Smart Healing Management ─────────────────────────────
     missing_hp = max_hp - hp
-    if missing_hp >= 20:
+    # Requires 1 EP to use an item
+    if missing_hp >= 20 and ep >= 1:
         heal = _find_smart_healing_item(inventory, missing_hp)
         if heal:
             return {"action": "use_item", "data": {"itemId": heal["id"]}, "reason": f"SMART HEAL: HP={hp}, using {heal.get('typeId')}"}
 
-    # ── 4. EP recovery ──────
+    # ── [OP MOD] 4. EP recovery & Emergency Rest ──────
     if ep == 0:
+        if not enemies_here and not region.get("isDeathZone") and region_id not in danger_ids:
+            return {"action": "rest", "data": {}, "reason": "EMERGENCY REST: EP=0 (Mencegah error INSUFFICIENT_EP)"}
+        return None # Unsafe, must wait for passive regen
+        
+    if ep == 1:
         energy_drink = _find_energy_drink(inventory)
         if energy_drink:
-            return {"action": "use_item", "data": {"itemId": energy_drink["id"]}, "reason": "EP RECOVERY"}
+            return {"action": "use_item", "data": {"itemId": energy_drink["id"]}, "reason": "EP RECOVERY: Sisa 1 EP, minum Energy Drink"}
 
     # ── [OP MOD] 5. Combat Engine (Kill Steal & Weather Avoidance) ───────────────
     valid_targets = [a for a in visible_agents if a.get("isAlive", True) and a.get("id") != self_data.get("id")]
     bad_weather = region_weather in ["storm", "fog"]
     
+    # Attack requires 2 EP
     if valid_targets and ep >= 2:
         w_range = get_weapon_range(equipped)
         best_target = None
@@ -278,7 +286,7 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
         if move_target:
             return {"action": "move", "data": {"regionId": move_target}, "reason": "EXPLORE: Active Hunting & Anti-Ping-Pong"}
 
-    # ── 10. Rest ───────────────────────
+    # ── 10. Rest (0 EP) ───────────────────────
     if ep < 6 and not enemies_here and not region.get("isDeathZone") and region_id not in danger_ids:
         return {"action": "rest", "data": {}, "reason": f"REST: EP={ep}/{max_ep}, area is safe"}
 
