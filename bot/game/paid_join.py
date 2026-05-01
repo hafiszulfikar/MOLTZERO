@@ -24,31 +24,27 @@ async def join_paid_game(api_key: str):
     uri = "wss://cdn.moltyroyale.com/ws/join"
     headers = {
         "X-API-Key": api_key,
-        "X-Version": SKILL_VERSION  # Wajib 1.6.0
+        "X-Version": SKILL_VERSION  # Pastikan di config.py nilainya "1.6.0"
     }
 
     log.info("Connecting to Unified Join WebSocket for PAID room...")
     
     try:
-        # Step 1: Buka koneksi WebSocket
         async with websockets.connect(uri, extra_headers=headers) as ws:
             
-            # Step 2: Tunggu frame 'welcome'
             welcome_msg = await ws.recv()
             welcome_data = json.loads(welcome_msg)
             
             if welcome_data.get("type") == "welcome":
                 
-                # Step 3: Kirim frame 'hello' khusus paid room
                 hello_payload = {
                     "type": "hello",
                     "entryType": "paid",
-                    "mode": "offchain" # Ubah ke "onchain" jika menggunakan Moltz on-chain
+                    "mode": "offchain" 
                 }
                 await ws.send(json.dumps(hello_payload))
                 log.info("Sent 'hello' frame for paid room.")
 
-                # Step 4: Handle State Machine dari server
                 while True:
                     resp_msg = await ws.recv()
                     resp_data = json.loads(resp_msg)
@@ -56,15 +52,11 @@ async def join_paid_game(api_key: str):
 
                     if msg_type == "sign_required":
                         log.info("Received sign_required. Signing EIP-712 data...")
-                        
-                        # Ekstrak joinIntentId dan data EIP-712 dari server
                         join_intent_id = resp_data.get("joinIntentId")
                         
-                        # Lakukan proses signing menggunakan fungsi bawaanmu
-                        # Sesuaikan ekstraksi 'resp_data' dengan struktur yang diminta oleh sign_join_paid
+                        # Sesuaikan ekstraksi 'resp_data' dengan fungsi sign_join_paid kamu
                         signature = sign_join_paid(agent_pk, resp_data) 
                         
-                        # Step 5: Submit signature kembali ke server
                         sign_submit_payload = {
                             "type": "sign_submit",
                             "joinIntentId": join_intent_id,
@@ -83,14 +75,14 @@ async def join_paid_game(api_key: str):
                         game_id = resp_data.get("gameId")
                         agent_id = resp_data.get("agentId")
                         log.info(f"✅ Successfully joined paid game: game={game_id} agent={agent_id}")
-                        
-                        # Kembalikan socket yang aktif agar bisa dilanjutkan oleh brain.py (game loop)
                         return resp_data, ws
                         
                     elif msg_type == "error":
                         log.error(f"❌ Error joining paid room: {resp_data}")
-                        return None, None
+                        # [PERBAIKAN] Ganti None, None menjadi dict palsu agar heartbeat tidak crash
+                        return {"status": "error", "message": str(resp_data)}, None
                         
     except Exception as e:
         log.error(f"WebSocket error during paid matchmaking: {e}")
-        return None, None
+        # [PERBAIKAN] Sama seperti di atas
+        return {"status": "error", "message": str(e)}, None
