@@ -1,49 +1,69 @@
+"""
+Free game join — v1.6.0 Unified WebSocket flow.
+Connect WS → hello (free) → queued → assigned.
+"""
 import json
 import websockets
 from bot.config import SKILL_VERSION
+from bot.utils.logger import get_logger
 
-async def join_free_game(api_key):
+log = get_logger(__name__)
+
+async def join_free_game(api_key: str):
+    """
+    Join a free room via Unified WebSocket flow.
+    Returns (response_data, websocket) when successfully assigned.
+    """
     uri = "wss://cdn.moltyroyale.com/ws/join"
     headers = {
         "X-API-Key": api_key,
-        "X-Version": SKILL_VERSION
+        "X-Version": SKILL_VERSION  # Wajib 1.6.0
     }
 
+    log.info("Connecting to Unified Join WebSocket for FREE room...")
+
     try:
+        # Menggunakan additional_headers untuk library websockets versi terbaru
         async with websockets.connect(uri, additional_headers=headers) as ws:
+            
             welcome_msg = await ws.recv()
             welcome_data = json.loads(welcome_msg)
             
-            # Jika server membalas dengan welcome
             if welcome_data.get("type") == "welcome":
+                
                 hello_payload = {
                     "type": "hello",
                     "entryType": "free"
                 }
                 await ws.send(json.dumps(hello_payload))
+                log.info("Sent 'hello' frame for free room.")
 
                 while True:
                     response_msg = await ws.recv()
                     response_data = json.loads(response_msg)
+                    msg_type = response_data.get("type") or response_data.get("status")
                     
-                    if response_data.get("type") == "assigned" or response_data.get("status") == "assigned":
-                        print(f"✅ Match Found! Game ID: {response_data.get('gameId')}")
+                    if msg_type == "assigned":
+                        game_id = response_data.get("gameId")
+                        agent_id = response_data.get("agentId")
+                        log.info(f"✅ Match Found! Game ID: {game_id} | Agent ID: {agent_id}")
+                        # Jangan tutup socket-nya, return ke game loop!
                         return response_data, ws
                         
-                    elif response_data.get("status") == "not_selected":
+                    elif msg_type == "not_selected":
+                        log.info("⚠️ Tidak dapat tempat di putaran ini. Harus re-dial...")
                         return {"status": "not_selected"}, None
                         
-                    elif response_data.get("status") == "queued":
-                        print("⏳ Masih mengantre di dalam server...")
+                    elif msg_type == "queued":
+                        log.info("⏳ Masih mengantre di dalam server...")
             
-            # [PERBAIKAN] Jika pesan pertama bukan "welcome" (misalnya error dari server)
             else:
-                print(f"⚠️ Ditolak server sebelum masuk: {welcome_data}")
+                log.error(f"⚠️ Ditolak server sebelum masuk: {welcome_data}")
                 return {"status": "error", "message": str(welcome_data)}, None
 
     except Exception as e:
-        print(f"Error saat matchmaking: {e}")
+        log.error(f"WebSocket error during free matchmaking: {e}")
         return {"status": "error", "message": str(e)}, None
 
-    # [PERBAIKAN FINAL] Jaring pengaman mutlak di paling bawah fungsi
-    return {"status": "error", "message": "Fungsi berhenti secara tidak terduga"}, None
+    # Jaring pengaman mutlak
+    return {"status": "error", "message": "Fungsi free_join berhenti secara tidak terduga"}, None
