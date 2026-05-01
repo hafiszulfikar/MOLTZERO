@@ -11,19 +11,20 @@ from bot.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-async def join_paid_game(api_key: str):
-    """
-    Join a paid room via EIP-712 signed WebSocket flow.
-    Returns (response_data, websocket) when successfully joined.
-    """
+async def join_paid_game(api):
+    # Ambil kunci agen
     agent_pk = get_agent_private_key()
     if not agent_pk:
         log.error("Agent private key not found")
         return {"status": "error", "message": "Agent private key not found"}, None
 
+    # Ekstrak API Key dari objek
+    api_key_string = api.api_key if hasattr(api, 'api_key') else str(api)
+    api_key_string = api_key_string.strip()
+
     uri = "wss://cdn.moltyroyale.com/ws/join"
     headers = {
-        "Authorization": f"mr-auth {api_key}",  # <-- Gunakan format mr-auth
+        "Authorization": f"mr-auth {api_key_string}",
         "X-Version": SKILL_VERSION
     }
 
