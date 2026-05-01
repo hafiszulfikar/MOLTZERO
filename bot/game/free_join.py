@@ -9,21 +9,24 @@ from bot.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-async def join_free_game(api_key: str):
+async def join_free_game(api):
     """
     Join a free room via Unified WebSocket flow.
     Returns (response_data, websocket) when successfully assigned.
     """
+    # [PERBAIKAN KRUSIAL] Ambil API Key dari objek MoltyAPI jika yang dilempar adalah objek
+    api_key_string = api.api_key if hasattr(api, 'api_key') else str(api)
+    api_key_string = api_key_string.strip() # Bersihkan dari karakter enter/spasi yang tersembunyi
+
     uri = "wss://cdn.moltyroyale.com/ws/join"
     headers = {
-        "Authorization": f"mr-auth {api_key}",  # <-- Gunakan format mr-auth
-        "X-Version": SKILL_VERSION
+        "Authorization": f"mr-auth {api_key_string}", # Format auth rekomendasi server
+        "X-Version": SKILL_VERSION  # Wajib 1.6.0
     }
 
     log.info("Connecting to Unified Join WebSocket for FREE room...")
 
     try:
-        # Menggunakan additional_headers untuk library websockets versi terbaru
         async with websockets.connect(uri, additional_headers=headers) as ws:
             
             welcome_msg = await ws.recv()
@@ -47,7 +50,6 @@ async def join_free_game(api_key: str):
                         game_id = response_data.get("gameId")
                         agent_id = response_data.get("agentId")
                         log.info(f"✅ Match Found! Game ID: {game_id} | Agent ID: {agent_id}")
-                        # Jangan tutup socket-nya, return ke game loop!
                         return response_data, ws
                         
                     elif msg_type == "not_selected":
@@ -65,5 +67,4 @@ async def join_free_game(api_key: str):
         log.error(f"WebSocket error during free matchmaking: {e}")
         return {"status": "error", "message": str(e)}, None
 
-    # Jaring pengaman mutlak
     return {"status": "error", "message": "Fungsi free_join berhenti secara tidak terduga"}, None
