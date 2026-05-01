@@ -1,74 +1,47 @@
-"""
-Free game join via matchmaking queue.
-POST /join (Long Poll ~15s) → assigned → open WS immediately.
-No extra sleep between retries per free-games.md.
-"""
-from bot.api_client import MoltyAPI, APIError
-from bot.utils.logger import get_logger
+import json
+import websockets
+from bot.config import SKILL_VERSION
 
-log = get_logger(__name__)
+async def join_free_game(api_key):
+    uri = "wss://cdn.moltyroyale.com/ws/join"
+    headers = {
+        "X-API-Key": api_key,
+        "X-Version": SKILL_VERSION  # Wajib 1.6.0
+    }
 
-
-async def join_free_game(api: MoltyAPI) -> tuple[str, str]:
-    """
-    Enter free matchmaking queue and wait for assignment.
-    Returns (game_id, agent_id) when assigned.
-    """
-    # Idempotency guard: check queue status first
     try:
-        status_resp = await api.get_join_status()
-        if isinstance(status_resp, dict):
-            status = status_resp.get("status", "not_queued")
-            if status == "assigned":
-                gid = status_resp.get("gameId", "")
-                aid = status_resp.get("agentId", "")
-                if gid and aid:
-                    log.info("Already assigned to game: %s", gid)
-                    return gid, aid
-            elif status == "queued":
-                log.info("Already in queue, resuming...")
-    except APIError:
-        pass
+        # 1. Buka koneksi ke Unified Join WS
+        async with websockets.connect(uri, extra_headers=headers) as ws:
+            
+            # 2. Baca frame "welcome" dari server
+            welcome_msg = await ws.recv()
+            welcome_data = json.loads(welcome_msg)
+            
+            if welcome_data.get("type") == "welcome":
+                # 3. Kirim frame "hello" untuk masuk antrean Free Room
+                hello_payload = {
+                    "type": "hello",
+                    "entryType": "free"
+                }
+                await ws.send(json.dumps(hello_payload))
 
-    # Queue loop — no extra sleep, server Long Poll throttles (per free-games.md)
-    attempt = 0
-    while True:
-        attempt += 1
-        log.info("Free queue attempt #%d...", attempt)
-
-        try:
-            resp = await api.post_join("free")
-            if not isinstance(resp, dict):
-                log.warning("Unexpected join response type: %s", type(resp).__name__)
-                continue
-
-            status = resp.get("status", "")
-
-            if status == "assigned":
-                gid = resp.get("gameId", "")
-                aid = resp.get("agentId", "")
-                if gid and aid:
-                    log.info("✅ Assigned to free game: %s (agent=%s)", gid, aid)
-                    return gid, aid
-                log.warning("Assigned but missing gameId/agentId: %s", resp)
-
-            if status in ("not_selected", "queued"):
-                log.debug("Queue status: %s — retrying immediately", status)
-                continue
-
-            log.warning("Unexpected queue response: %s", resp)
-
-        except APIError as e:
-            if e.code == "NO_IDENTITY":
-                log.error("❌ ERC-8004 identity not registered. Cannot join free room.")
-                raise
-            if e.code == "OWNERSHIP_LOST":
-                log.error("❌ NFT ownership changed. Re-register identity.")
-                raise
-            if e.code == "TOO_MANY_AGENTS_PER_IP":
-                log.error("❌ IP agent limit reached for this game")
-                raise
-            if e.code == "ACCOUNT_ALREADY_IN_GAME":
-                log.info("Already in a game. Returning to heartbeat.")
-                raise
-            log.warning("Join error: %s — retrying", e)
+                # 4. Tunggu hasil antrean
+                while True:
+                    response_msg = await ws.recv()
+                    response_data = json.loads(response_msg)
+                    
+                    if response_data.get("type") == "assigned" or response_data.get("status") == "assigned":
+                        print(f"✅ Match Found! Game ID: {response_data.get('gameId')}")
+                        # JANGAN TUTUP 'ws'. Return websocket ini ke game loop kamu!
+                        return response_data, ws
+                        
+                    elif response_data.get("status") == "not_selected":
+                        print("⚠️ Tidak dapat tempat di putaran ini. Harus re-dial...")
+                        return None, None
+                        
+                    elif response_data.get("status") == "queued":
+                        print("⏳ Masih mengantre di dalam server...")
+                        
+    except Exception as e:
+        print(f"Error saat matchmaking: {e}")
+        return None, None
