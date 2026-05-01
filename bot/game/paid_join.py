@@ -1,16 +1,15 @@
 """
 Paid game join — v1.6.0 Unified WebSocket EIP-712 flow.
-Per paid-games.md & api-summary.md: connect WS → hello (paid) → sign_required → sign_submit → joined.
+Connect WS → hello (paid) → sign_required → sign_submit → joined.
 """
 import json
 import websockets
 from bot.web3.eip712_signer import sign_join_paid
 from bot.credentials import get_agent_private_key
-from bot.config import PAID_ENTRY_FEE_SMOLTZ, SKILL_VERSION
+from bot.config import SKILL_VERSION
 from bot.utils.logger import get_logger
 
 log = get_logger(__name__)
-
 
 async def join_paid_game(api_key: str):
     """
@@ -19,32 +18,21 @@ async def join_paid_game(api_key: str):
     """
     agent_pk = get_agent_private_key()
     if not agent_pk:
-        raise RuntimeError("Agent private key not found")
+        log.error("Agent private key not found")
+        return {"status": "error", "message": "Agent private key not found"}, None
 
     uri = "wss://cdn.moltyroyale.com/ws/join"
     headers = {
         "X-API-Key": api_key,
-        "X-Version": SKILL_VERSION  # Pastikan di config.py nilainya "1.6.0"
+        "X-Version": SKILL_VERSION  # Wajib 1.6.0
     }
 
     log.info("Connecting to Unified Join WebSocket for PAID room...")
     
     try:
+        # Menggunakan additional_headers untuk library websockets versi terbaru
         async with websockets.connect(uri, additional_headers=headers) as ws:
-            # ... di dalam try: async with websockets.connect(...)
-            if welcome_data.get("type") == "welcome":
-                # ... (kode hello dan sign_submit) ...
             
-            else:
-                log.error(f"⚠️ Ditolak server sebelum masuk (Paid): {welcome_data}")
-                return {"status": "error", "message": str(welcome_data)}, None
-
-    except Exception as e:
-        log.error(f"WebSocket error during paid matchmaking: {e}")
-        return {"status": "error", "message": str(e)}, None
-
-    # Jaring pengaman mutlak
-    return {"status": "error", "message": "Fungsi berhenti secara tidak terduga"}, None
             welcome_msg = await ws.recv()
             welcome_data = json.loads(welcome_msg)
             
@@ -67,7 +55,6 @@ async def join_paid_game(api_key: str):
                         log.info("Received sign_required. Signing EIP-712 data...")
                         join_intent_id = resp_data.get("joinIntentId")
                         
-                        # Sesuaikan ekstraksi 'resp_data' dengan fungsi sign_join_paid kamu
                         signature = sign_join_paid(agent_pk, resp_data) 
                         
                         sign_submit_payload = {
@@ -88,14 +75,20 @@ async def join_paid_game(api_key: str):
                         game_id = resp_data.get("gameId")
                         agent_id = resp_data.get("agentId")
                         log.info(f"✅ Successfully joined paid game: game={game_id} agent={agent_id}")
+                        # Jangan tutup socket-nya, return ke game loop!
                         return resp_data, ws
                         
                     elif msg_type == "error":
                         log.error(f"❌ Error joining paid room: {resp_data}")
-                        # [PERBAIKAN] Ganti None, None menjadi dict palsu agar heartbeat tidak crash
                         return {"status": "error", "message": str(resp_data)}, None
-                        
+            
+            else:
+                log.error(f"⚠️ Ditolak server sebelum masuk (Paid): {welcome_data}")
+                return {"status": "error", "message": str(welcome_data)}, None
+
     except Exception as e:
         log.error(f"WebSocket error during paid matchmaking: {e}")
-        # [PERBAIKAN] Sama seperti di atas
         return {"status": "error", "message": str(e)}, None
+
+    # Jaring pengaman mutlak
+    return {"status": "error", "message": "Fungsi paid_join berhenti secara tidak terduga"}, None
