@@ -2,13 +2,13 @@
 Strategy brain — main decision engine with priority-based action selection.
 Implements the game-loop.md priority chain for high win rate.
 
-v1.5.2 OP Mod changes:
-- [OP MOD] Time-to-Kill (TTK) combat calculation: fights only if guaranteed to win or 1-shot.
+v1.5.3 OP Mod changes:
+- [OP MOD] Sniper + Hills Meta: Heavily prioritizes Hills if Sniper is equipped.
+- [OP MOD] Absolute Kill Steal: +9000 priority for any target that can be 1-shot.
+- [OP MOD] Weather Avoidance: Refuses to fight in Storm/Fog UNLESS it's a guaranteed 1-shot kill steal.
+- [OP MOD] Time-to-Kill (TTK) combat calculation: fights only if guaranteed to win.
 - [OP MOD] Anti-Gank protocol: flees if outnumbered in a single region.
 - [OP MOD] Smart Healing: prevents overhealing and wasting high-tier meds.
-- Guardians now ATTACK player agents directly (hostile combatants)
-- Curse is TEMPORARILY DISABLED (no whisper Q&A flow)
-- Free room: 5 guardians (reduced from 30), each drops 120 sMoltz
 """
 import math
 from bot.utils.logger import get_logger
@@ -155,7 +155,6 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
             return {"action": "move", "data": {"regionId": safe}, "reason": "PRE-ESCAPE"}
 
     # ── [OP MOD] 2a. Anti-Gank / Flee Protocol ─────────────
-    # Flee if multiple enemies are in our room and we aren't near max HP.
     enemies = [a for a in visible_agents if not a.get("isGuardian", False) and a.get("isAlive", True) and a.get("id") != self_data.get("id")]
     enemies_here = [e for e in enemies if e.get("regionId") == region_id]
     if len(enemies_here) >= 2 and hp < 70 and ep >= move_ep_cost:
@@ -184,7 +183,6 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
     if not can_act: return None
 
     # ── [OP MOD] 3. Smart Healing Management ─────────────────────────────
-    # Uses exact math to prevent overheal. Heals if we are below 75% max HP.
     missing_hp = max_hp - hp
     if missing_hp >= 20:
         heal = _find_smart_healing_item(inventory, missing_hp)
@@ -197,14 +195,14 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
         if energy_drink:
             return {"action": "use_item", "data": {"itemId": energy_drink["id"]}, "reason": "EP RECOVERY"}
 
-    # ── [OP MOD] 5. Combat Engine (Guardians & Agents) ───────────────
-    # Combine agents and guardians for unified TTK assessment
+    # ── [OP MOD] 5. Combat Engine (Kill Steal & Weather Avoidance) ───────────────
     valid_targets = [a for a in visible_agents if a.get("isAlive", True) and a.get("id") != self_data.get("id")]
+    bad_weather = region_weather in ["storm", "fog"]
     
     if valid_targets and ep >= 2:
         w_range = get_weapon_range(equipped)
         best_target = None
-        best_ttk_diff = -999 # Higher is better (meaning we kill them much faster than they kill us)
+        best_ttk_diff = -999 
 
         for target in valid_targets:
             if not _is_in_range(target, region_id, w_range, connections):
@@ -217,16 +215,22 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
             my_dmg = calc_damage(atk, get_weapon_bonus(equipped), enemy_def, region_weather)
             enemy_dmg = calc_damage(enemy_atk, _estimate_enemy_weapon_bonus(target), defense, region_weather)
             
-            # TTK (Time to Kill) calculation
             my_ttk = math.ceil(enemy_hp / my_dmg) if my_dmg > 0 else 999
             enemy_ttk = math.ceil(hp / enemy_dmg) if enemy_dmg > 0 else 999
             
-            # OP Logic: Fight if we can 1-shot them, OR if our TTK is strictly better than theirs.
-            if my_ttk == 1 or my_ttk < enemy_ttk:
-                ttk_advantage = enemy_ttk - my_ttk
-                # Prioritize guardians if safe (for sMoltz) or highest advantage targets
+            ttk_advantage = enemy_ttk - my_ttk
+            is_kill_steal = (my_ttk == 1)
+
+            # OP Logic: Absolute priority for Kill Steals
+            if is_kill_steal:
+                ttk_advantage += 9000
+            elif bad_weather:
+                # Avoid normal fighting during bad weather to prevent debuff trades
+                continue 
+            
+            if is_kill_steal or my_ttk < enemy_ttk:
                 if target.get("isGuardian") and my_ttk <= 3:
-                    ttk_advantage += 5 # Artificial boost to farm guardians safely
+                    ttk_advantage += 5 
                 
                 if ttk_advantage > best_ttk_diff:
                     best_ttk_diff = ttk_advantage
@@ -237,12 +241,12 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
             return {
                 "action": "attack",
                 "data": {"targetId": best_target["id"], "targetType": "agent"},
-                "reason": f"OP COMBAT ({target_type}): We kill in {math.ceil(best_target.get('hp',100)/calc_damage(atk, get_weapon_bonus(equipped), best_target.get('def', 5), region_weather))} turns. HP={best_target.get('hp')}"
+                "reason": f"OP COMBAT ({target_type}): KS={is_kill_steal}. Target HP={best_target.get('hp')}"
             }
 
     # ── 7. Monster farming ───────────────────────────────
     monsters = [m for m in visible_monsters if m.get("hp", 0) > 0]
-    if monsters and ep >= 2:
+    if monsters and ep >= 2 and not bad_weather: # Refuse to farm in bad weather
         target = _select_weakest(monsters)
         w_range = get_weapon_range(equipped)
         if _is_in_range(target, region_id, w_range, connections):
@@ -254,9 +258,9 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
         if facility:
             return {"action": "interact", "data": {"interactableId": facility["id"]}, "reason": f"FACILITY: {facility.get('type')}"}
 
-    # ── 9. Strategic movement ────────────────────────────
+    # ── [OP MOD] 9. Strategic movement (Sniper Meta Included) ────────
     if ep >= move_ep_cost and connections:
-        move_target = _choose_move_target(connections, danger_ids, region, visible_items, alive_count)
+        move_target = _choose_move_target(connections, danger_ids, region, visible_items, alive_count, equipped)
         if move_target:
             return {"action": "move", "data": {"regionId": move_target}, "reason": "EXPLORE: Moving to better position"}
 
@@ -352,15 +356,10 @@ def _find_safe_region(connections, danger_ids: set, view: dict = None) -> str | 
     return None
 
 def _find_smart_healing_item(inventory: list, missing_hp: int) -> dict | None:
-    """[OP MOD] Prevents wasting big heals on small damage."""
     heals = [i for i in inventory if isinstance(i, dict) and i.get("typeId", "").lower() in RECOVERY_ITEMS and RECOVERY_ITEMS[i.get("typeId").lower()] > 0]
     if not heals: return None
 
-    # Sort heals by how well they fit the missing_hp without wasting too much
-    # E.g., if missing_hp is 25, Emergency Food (20) is better than Medkit (50).
     heals.sort(key=lambda i: abs(missing_hp - RECOVERY_ITEMS[i.get("typeId").lower()]))
-    
-    # If missing HP is massive (>60), force the biggest heal available
     if missing_hp >= 60:
         heals.sort(key=lambda i: RECOVERY_ITEMS[i.get("typeId").lower()], reverse=True)
         
@@ -435,9 +434,10 @@ def learn_from_map(view: dict):
     safe_regions.sort(key=lambda x: x[1], reverse=True)
     _map_knowledge["safe_center"] = [r[0] for r in safe_regions[:5]]
 
-def _choose_move_target(connections, danger_ids: set, current_region: dict, visible_items: list, alive_count: int) -> str | None:
+def _choose_move_target(connections, danger_ids: set, current_region: dict, visible_items: list, alive_count: int, equipped: dict = None) -> str | None:
     candidates = []
     item_regions = set([i.get("regionId", "") for i in visible_items if isinstance(i, dict)])
+    is_sniper = equipped and isinstance(equipped, dict) and equipped.get("typeId", "").lower() == "sniper"
 
     for conn in connections:
         if isinstance(conn, str):
@@ -448,7 +448,13 @@ def _choose_move_target(connections, danger_ids: set, current_region: dict, visi
             rid = conn.get("id", "")
             if not rid or conn.get("isDeathZone") or rid in danger_ids: continue
 
-            score = {"hills": 4, "plains": 2, "ruins": 2, "forest": 1, "water": -3}.get(conn.get("terrain", "").lower(), 0)
+            terrain = conn.get("terrain", "").lower()
+            score = {"hills": 4, "plains": 2, "ruins": 2, "forest": 1, "water": -3}.get(terrain, 0)
+            
+            # [OP MOD] Sniper + Hills Meta Priority
+            if is_sniper and terrain == "hills":
+                score += 15 # Massive boost for high ground if we have a sniper
+            
             if rid in item_regions: score += 5
             
             facs = conn.get("interactables", [])
