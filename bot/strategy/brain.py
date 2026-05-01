@@ -407,8 +407,16 @@ def _select_facility(interactables: list, hp: int, ep: int) -> dict | None:
     for fac in interactables:
         if isinstance(fac, dict) and not fac.get("isUsed"):
             ftype = fac.get("type", "").lower()
-            if ftype == "medical_facility" and hp < 80: return fac
-            if ftype in ["supply_cache", "watchtower", "broadcast_station"]: return fac
+            
+            # Prioritas 1: Heal jika HP di bawah 80
+            if ftype == "medical_facility" and hp < 80: 
+                return fac
+                
+            # Prioritas 2: Ambil item gratis atau dapatkan Vision tambahan
+            # KITA HAPUS "broadcast_station" DARI SINI
+            if ftype in ["supply_cache", "watchtower"]: 
+                return fac
+                
     return None
 
 def _track_agents(visible_agents: list, my_id: str, my_region: str):
