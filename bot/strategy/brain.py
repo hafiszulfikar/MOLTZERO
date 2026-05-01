@@ -2,7 +2,8 @@
 Strategy brain — main decision engine with priority-based action selection.
 Implements the game-loop.md priority chain for high win rate.
 
-v1.5.5 OP Mod changes:
+v1.5.6 OP Mod changes:
+- [OP MOD] Death Zone Paranoia: Absolute escape priority, bypassing all EP constraints if trapped.
 - [OP MOD] EP Management Fix: Rest costs 0 EP, use_item costs 1 EP. Emergency rest added.
 - [OP MOD] Anti-Ping-Pong: Bot remembers last visited region to prevent infinite loops.
 - [OP MOD] Sniper + Hills Meta: Heavily prioritizes Hills if Sniper is equipped.
@@ -71,8 +72,6 @@ def get_weapon_range(equipped_weapon) -> int:
 
 _known_agents: dict = {}
 _map_knowledge: dict = {"revealed": False, "death_zones": set(), "safe_center": []}
-
-# --- [OP MOD] Global Memory Variables ---
 _last_visited_region: str = ""
 _current_region_memory: str = ""
 
@@ -136,7 +135,6 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
     region_terrain = region.get("terrain", "").lower() if isinstance(region, dict) else ""
     region_weather = region.get("weather", "").lower() if isinstance(region, dict) else ""
 
-    # --- [OP MOD] Memory Update ---
     global _last_visited_region, _current_region_memory
     if region_id and region_id != _current_region_memory:
         _last_visited_region = _current_region_memory
@@ -157,11 +155,14 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
     _track_agents(visible_agents, self_data.get("id", ""), region_id)
     move_ep_cost = _get_move_ep_cost(region_terrain, region_weather)
 
-    # ── 1. DEATHZONE ESCAPE ───────
+    # ── 1. DEATHZONE ESCAPE (ABSOLUTE PRIORITY) ───────
+    # Memaksa bot kabur meski EP kurang dari teori, berjaga-jaga delay server
     if region.get("isDeathZone", False):
         safe = _find_safe_region(connections, danger_ids, view)
-        if safe and ep >= move_ep_cost:
+        if safe and ep >= 1: 
             return {"action": "move", "data": {"regionId": safe}, "reason": f"ESCAPE: In DZ! HP={hp}"}
+        elif safe and ep == 0:
+             return {"action": "rest", "data": {}, "reason": "EMERGENCY REST: 0 EP in DZ"}
 
     # ── 1b. Pre-escape pending DZ ────────────────
     if region_id in danger_ids:
@@ -172,7 +173,7 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
     # ── [OP MOD] 2a. Anti-Gank / Flee Protocol ─────────────
     enemies = [a for a in visible_agents if not a.get("isGuardian", False) and a.get("isAlive", True) and a.get("id") != self_data.get("id")]
     enemies_here = [e for e in enemies if e.get("regionId") == region_id]
-    if len(enemies_here) >= 2 and hp < 70 and ep >= move_ep_cost:
+    if len(enemies_here) >= 2 and hp < 85 and ep >= move_ep_cost:
         safe = _find_safe_region(connections, danger_ids, view)
         if safe:
             log.warning("⚠️ ANTI-GANK: Outnumbered by %d agents, repositioning!", len(enemies_here))
@@ -199,7 +200,6 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
 
     # ── [OP MOD] 3. Smart Healing Management ─────────────────────────────
     missing_hp = max_hp - hp
-    # Requires 1 EP to use an item
     if missing_hp >= 20 and ep >= 1:
         heal = _find_smart_healing_item(inventory, missing_hp)
         if heal:
@@ -209,7 +209,7 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
     if ep == 0:
         if not enemies_here and not region.get("isDeathZone") and region_id not in danger_ids:
             return {"action": "rest", "data": {}, "reason": "EMERGENCY REST: EP=0 (Mencegah error INSUFFICIENT_EP)"}
-        return None # Unsafe, must wait for passive regen
+        return None 
         
     if ep == 1:
         energy_drink = _find_energy_drink(inventory)
@@ -220,7 +220,6 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
     valid_targets = [a for a in visible_agents if a.get("isAlive", True) and a.get("id") != self_data.get("id")]
     bad_weather = region_weather in ["storm", "fog"]
     
-    # Attack requires 2 EP
     if valid_targets and ep >= 2:
         w_range = get_weapon_range(equipped)
         best_target = None
@@ -243,11 +242,9 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
             ttk_advantage = enemy_ttk - my_ttk
             is_kill_steal = (my_ttk == 1)
 
-            # OP Logic: Absolute priority for Kill Steals
             if is_kill_steal:
                 ttk_advantage += 9000
             elif bad_weather:
-                # Avoid normal fighting during bad weather to prevent debuff trades
                 continue 
             
             if is_kill_steal or my_ttk < enemy_ttk:
@@ -268,7 +265,7 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
 
     # ── 7. Monster farming ───────────────────────────────
     monsters = [m for m in visible_monsters if m.get("hp", 0) > 0]
-    if monsters and ep >= 2 and not bad_weather: # Refuse to farm in bad weather
+    if monsters and ep >= 2 and not bad_weather: 
         target = _select_weakest(monsters)
         w_range = get_weapon_range(equipped)
         if _is_in_range(target, region_id, w_range, connections):
@@ -407,16 +404,8 @@ def _select_facility(interactables: list, hp: int, ep: int) -> dict | None:
     for fac in interactables:
         if isinstance(fac, dict) and not fac.get("isUsed"):
             ftype = fac.get("type", "").lower()
-            
-            # Prioritas 1: Heal jika HP di bawah 80
-            if ftype == "medical_facility" and hp < 80: 
-                return fac
-                
-            # Prioritas 2: Ambil item gratis atau dapatkan Vision tambahan
-            # KITA HAPUS "broadcast_station" DARI SINI
-            if ftype in ["supply_cache", "watchtower"]: 
-                return fac
-                
+            if ftype == "medical_facility" and hp < 80: return fac
+            if ftype in ["supply_cache", "watchtower"]: return fac
     return None
 
 def _track_agents(visible_agents: list, my_id: str, my_region: str):
@@ -473,10 +462,7 @@ def _choose_move_target(connections, danger_ids: set, current_region: dict, visi
         if isinstance(conn, str):
             if conn in danger_ids: continue
             score = 6 if conn in item_regions else 1
-            
-            # [OP MOD] Anti-Ping-Pong memory penalty
             if conn == last_visited: score -= 10
-                
             candidates.append((conn, score))
         elif isinstance(conn, dict):
             rid = conn.get("id", "")
@@ -485,11 +471,9 @@ def _choose_move_target(connections, danger_ids: set, current_region: dict, visi
             terrain = conn.get("terrain", "").lower()
             score = {"hills": 4, "plains": 2, "ruins": 2, "forest": 1, "water": -3}.get(terrain, 0)
             
-            # [OP MOD] Sniper + Hills Meta Priority
             if is_sniper and terrain == "hills":
-                score += 15 # Massive boost for high ground if we have a sniper
+                score += 15 
                 
-            # [OP MOD] Anti-Ping-Pong memory penalty
             if rid == last_visited:
                 score -= 10 
             
