@@ -16,8 +16,8 @@ async def join_free_game(api_key: str):
     """
     uri = "wss://cdn.moltyroyale.com/ws/join"
     headers = {
-        "X-API-Key": api_key,
-        "X-Version": SKILL_VERSION  # Wajib 1.6.0
+        "Authorization": f"mr-auth {api_key}",  # <-- Gunakan format mr-auth
+        "X-Version": SKILL_VERSION
     }
 
     log.info("Connecting to Unified Join WebSocket for FREE room...")
