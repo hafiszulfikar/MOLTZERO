@@ -31,7 +31,20 @@ async def join_paid_game(api_key: str):
     
     try:
         async with websockets.connect(uri, additional_headers=headers) as ws:
+            # ... di dalam try: async with websockets.connect(...)
+            if welcome_data.get("type") == "welcome":
+                # ... (kode hello dan sign_submit) ...
             
+            else:
+                log.error(f"⚠️ Ditolak server sebelum masuk (Paid): {welcome_data}")
+                return {"status": "error", "message": str(welcome_data)}, None
+
+    except Exception as e:
+        log.error(f"WebSocket error during paid matchmaking: {e}")
+        return {"status": "error", "message": str(e)}, None
+
+    # Jaring pengaman mutlak
+    return {"status": "error", "message": "Fungsi berhenti secara tidak terduga"}, None
             welcome_msg = await ws.recv()
             welcome_data = json.loads(welcome_msg)
             
