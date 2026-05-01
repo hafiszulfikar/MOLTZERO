@@ -30,7 +30,7 @@ async def join_paid_game(api_key: str):
     log.info("Connecting to Unified Join WebSocket for PAID room...")
     
     try:
-        async with websockets.connect(uri, extra_headers=headers) as ws:
+        async with websockets.connect(uri, additional_headers=headers) as ws:
             
             welcome_msg = await ws.recv()
             welcome_data = json.loads(welcome_msg)
