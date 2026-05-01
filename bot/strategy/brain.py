@@ -2,7 +2,8 @@
 Strategy brain — main decision engine with priority-based action selection.
 Implements the game-loop.md priority chain for high win rate.
 
-v1.5.3 OP Mod changes:
+v1.5.4 OP Mod changes:
+- [OP MOD] Anti-Ping-Pong: Bot remembers last visited region to prevent infinite loops.
 - [OP MOD] Sniper + Hills Meta: Heavily prioritizes Hills if Sniper is equipped.
 - [OP MOD] Absolute Kill Steal: +9000 priority for any target that can be 1-shot.
 - [OP MOD] Weather Avoidance: Refuses to fight in Storm/Fog UNLESS it's a guaranteed 1-shot kill steal.
@@ -70,6 +71,10 @@ def get_weapon_range(equipped_weapon) -> int:
 _known_agents: dict = {}
 _map_knowledge: dict = {"revealed": False, "death_zones": set(), "safe_center": []}
 
+# --- [OP MOD] Global Memory Variables ---
+_last_visited_region: str = ""
+_current_region_memory: str = ""
+
 def _resolve_region(entry, view: dict):
     if isinstance(entry, dict): return entry
     if isinstance(entry, str):
@@ -84,9 +89,11 @@ def _get_region_id(entry) -> str:
     return ""
 
 def reset_game_state():
-    global _known_agents, _map_knowledge
+    global _known_agents, _map_knowledge, _last_visited_region, _current_region_memory
     _known_agents = {}
     _map_knowledge = {"revealed": False, "death_zones": set(), "safe_center": []}
+    _last_visited_region = ""
+    _current_region_memory = ""
     log.info("Strategy brain reset for new game")
 
 def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict | None:
@@ -123,9 +130,16 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
 
     connections = connected_regions or region.get("connections", [])
     interactables = region.get("interactables", [])
+    
     region_id = region.get("id", "")
     region_terrain = region.get("terrain", "").lower() if isinstance(region, dict) else ""
     region_weather = region.get("weather", "").lower() if isinstance(region, dict) else ""
+
+    # --- [OP MOD] Memory Update ---
+    global _last_visited_region, _current_region_memory
+    if region_id and region_id != _current_region_memory:
+        _last_visited_region = _current_region_memory
+        _current_region_memory = region_id
 
     if not is_alive: return None
 
@@ -258,11 +272,11 @@ def decide_action(view: dict, can_act: bool, memory_temp: dict = None) -> dict |
         if facility:
             return {"action": "interact", "data": {"interactableId": facility["id"]}, "reason": f"FACILITY: {facility.get('type')}"}
 
-    # ── [OP MOD] 9. Strategic movement (Sniper Meta Included) ────────
+    # ── [OP MOD] 9. Strategic movement (Sniper Meta + Anti-Ping-Pong Included) ────────
     if ep >= move_ep_cost and connections:
-        move_target = _choose_move_target(connections, danger_ids, region, visible_items, alive_count, equipped)
+        move_target = _choose_move_target(connections, danger_ids, region, visible_items, alive_count, equipped, _last_visited_region)
         if move_target:
-            return {"action": "move", "data": {"regionId": move_target}, "reason": "EXPLORE: Moving to better position"}
+            return {"action": "move", "data": {"regionId": move_target}, "reason": "EXPLORE: Active Hunting & Anti-Ping-Pong"}
 
     # ── 10. Rest ───────────────────────
     if ep < 6 and not enemies_here and not region.get("isDeathZone") and region_id not in danger_ids:
@@ -434,7 +448,7 @@ def learn_from_map(view: dict):
     safe_regions.sort(key=lambda x: x[1], reverse=True)
     _map_knowledge["safe_center"] = [r[0] for r in safe_regions[:5]]
 
-def _choose_move_target(connections, danger_ids: set, current_region: dict, visible_items: list, alive_count: int, equipped: dict = None) -> str | None:
+def _choose_move_target(connections, danger_ids: set, current_region: dict, visible_items: list, alive_count: int, equipped: dict = None, last_visited: str = "") -> str | None:
     candidates = []
     item_regions = set([i.get("regionId", "") for i in visible_items if isinstance(i, dict)])
     is_sniper = equipped and isinstance(equipped, dict) and equipped.get("typeId", "").lower() == "sniper"
@@ -443,6 +457,10 @@ def _choose_move_target(connections, danger_ids: set, current_region: dict, visi
         if isinstance(conn, str):
             if conn in danger_ids: continue
             score = 6 if conn in item_regions else 1
+            
+            # [OP MOD] Anti-Ping-Pong memory penalty
+            if conn == last_visited: score -= 10
+                
             candidates.append((conn, score))
         elif isinstance(conn, dict):
             rid = conn.get("id", "")
@@ -454,6 +472,10 @@ def _choose_move_target(connections, danger_ids: set, current_region: dict, visi
             # [OP MOD] Sniper + Hills Meta Priority
             if is_sniper and terrain == "hills":
                 score += 15 # Massive boost for high ground if we have a sniper
+                
+            # [OP MOD] Anti-Ping-Pong memory penalty
+            if rid == last_visited:
+                score -= 10 
             
             if rid in item_regions: score += 5
             
